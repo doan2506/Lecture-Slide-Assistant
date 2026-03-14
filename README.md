@@ -1,1 +1,1 @@
-# Documentation-Chatbot
+# Lecture-Slide-Assistant
