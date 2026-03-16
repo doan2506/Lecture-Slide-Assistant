@@ -21,11 +21,11 @@ def main():
                 cache_slide_path = os.path.join(cache_folder_path, f"{subject}_{slide}.pkl")
                 print(f"📄 Loading {slide}...")
                 if os.path.exists(cache_slide_path):
-                    print(f"⚡ [CACHE] Đọc siêu tốc file: {slide}")
+                    print(f"⚡ [CACHE] Loading {slide} from cache...")
                     with open(cache_slide_path, "rb") as f:
                         doc = pickle.load(f)
                 else:
-                    print(f"🐌 [DOCLING] Đang bóc tách file mới: {slide}...")
+                    print(f"🐌 [DOCLING] Extracting {slide}...")
                     loader = DoclingLoader(file_path=slide_path, export_type=ExportType.MARKDOWN)
                     doc = loader.load()
                     with open(cache_slide_path, "wb") as f:
