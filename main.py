@@ -1,44 +1,146 @@
-import os
 import pickle
 import time
-from langchain_docling import DoclingLoader
+import os
+from pathlib import Path
+from tkinter.messagebox import QUESTION
 from langchain_docling.loader import ExportType
+from transformers import AutoTokenizer
+from docling_core.transforms.chunker.tokenizer.huggingface import HuggingFaceTokenizer
+from langchain_community.vectorstores import FAISS, DistanceStrategy
+from langchain_huggingface.embeddings import HuggingFaceEmbeddings 
+from langchain_core.prompts import PromptTemplate
+from langchain_classic.chains import create_retrieval_chain
+from langchain_classic.chains.combine_documents import create_stuff_documents_chain
+from langchain_google_genai import ChatGoogleGenerativeAI
+from dotenv import load_dotenv
 
-data_folder_path = "./data"
-cache_folder_path = "./cache"
-def main():
+EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+LLM = "gemini-3.1-flash-lite-preview"
+EXPORT_TYPE = ExportType.DOC_CHUNKS
+TOP_K = 3
+PROMPT_TEMPLATE = PromptTemplate.from_template(
+    "Context information is below.\n---------------------\n{context}\n---------------------\nGiven the context information and not prior knowledge, answer the query.\nQuery: {input}\nAnswer:\n"
+)
+
+data = Path("./data")
+cache = Path("./cache")
+cache.mkdir(exist_ok=True)
+
+def load_documents():
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
     print("Loading documents...")
-
+    
+    start_time = time.time()
+    docling_imported = False 
     chunks = []
 
-    start_time = time.time()
+    tokenizer = HuggingFaceTokenizer(
+        tokenizer = AutoTokenizer.from_pretrained(EMBEDDING_MODEL)
+    )
 
-    for subject in os.listdir(data_folder_path):
-        subject_path = os.path.join(data_folder_path, subject)
-        for slide in os.listdir(subject_path):
-            if slide.endswith((".pdf", ".pptx")):
-                slide_path = os.path.join(subject_path, slide)
-                cache_slide_path = os.path.join(cache_folder_path, f"{subject}_{slide}.pkl")
-                print(f"📄 Loading {slide}...")
-                if os.path.exists(cache_slide_path):
-                    print(f"⚡ [CACHE] Loading {slide} from cache...")
-                    with open(cache_slide_path, "rb") as f:
-                        doc = pickle.load(f)
-                else:
-                    print(f"🐌 [DOCLING] Extracting {slide}...")
-                    loader = DoclingLoader(file_path=slide_path, export_type=ExportType.MARKDOWN)
-                    doc = loader.load()
-                    with open(cache_slide_path, "wb") as f:
-                        pickle.dump(doc, f)
-                chunks.extend(doc)
-
-    print(f"\n📊 Total chunks loaded: {len(chunks)}")
-    for i, chunk in enumerate(chunks[:5]):
-        print(f"\n--- Chunk {i+1} ---")
-        print("Content:", chunk.page_content)
+    for subject in data.iterdir():
+        for document in subject.iterdir():
+            print(f"Processing {document.name}...")
+            cached_doc = cache / f"{document.stem}.pkl"
+            if cached_doc.exists():
+                with open(cached_doc, "rb") as f:
+                    content = pickle.load(f)
+                chunks.extend(content)
+                continue
+            if not docling_imported:
+                docling_imported = True
+                from langchain_docling import DoclingLoader
+                from docling.chunking import HybridChunker
+            try:
+                loader = DoclingLoader(
+                    file_path=str(document),
+                    export_type=EXPORT_TYPE,
+                    chunker=HybridChunker(tokenizer=tokenizer)
+                )
+                content = loader.load()
+                with open(cached_doc, "wb") as f:
+                    pickle.dump(content, f)
+                chunks.extend(content)
+            except Exception as e:
+                print(f"Lỗi khi xử lý {document.name}: {e}")
 
     end_time = time.time()
-    print(f"\n⏱️ Total loading time: {end_time - start_time:.2f} seconds")
+    print(f"\nTotal loading time: {end_time - start_time:.2f} seconds")
+    return chunks
+
+def ingest():
+    chunks = load_documents()
+    embedding = HuggingFaceEmbeddings(
+        model_name=EMBEDDING_MODEL,
+        model_kwargs={'device': 'cpu'}
+    )
+    db = Path("faiss_db")
+
+    if db.exists():
+        print("Loading existing FAISS vector database...")
+        vectorstore = FAISS.load_local(
+            str(db), 
+            embedding,
+            allow_dangerous_deserialization=True
+        )
+    else:
+        print("Creating new FAISS vector database...")
+        vectorstore = FAISS.from_documents(
+            documents=chunks, 
+            embedding=embedding,
+            distance_strategy=DistanceStrategy.COSINE
+        )
+        vectorstore.save_local(str(db))
+    
+    return vectorstore
+
+def clip_text(text, threshold=100):
+    return f"{text[:threshold]}..." if len(text) > threshold else text
+
+def print_response(resp_dict):
+    clipped_answer = clip_text(resp_dict["answer"], threshold=500)
+    print(f"\nANSWER:\n   {clipped_answer}")
+    
+    for i, doc in enumerate(resp_dict["context"]):
+        print(f"\n[Source {i + 1}]")
+        content = doc.page_content.replace("\n", " ").strip()
+        print(f"  Text preview: {clip_text(content, threshold=250)}")
+        page = doc.metadata.get("page_no") or doc.metadata.get("page_number", "N/A")
+        heading = doc.metadata.get("heading", "No Heading") 
+        print(f"  Location:     Page {page} | Heading: {heading}")
+        if "score" in doc.metadata:
+            print(f"  Relevance Score: {doc.metadata['score']:.4f}")
+
+def main():
+    vectorstore = ingest()
+    retriever = vectorstore.as_retriever(
+        search_type="similarity",
+        search_kwargs={"k": TOP_K}
+    )
+
+    load_dotenv()
+    print("⏳ Connecting to Google Generative AI API...")
+    try:
+        llm = ChatGoogleGenerativeAI(model=LLM)
+        
+        question_answer_chain = create_stuff_documents_chain(llm, PROMPT_TEMPLATE)
+        rag_chain = create_retrieval_chain(retriever, question_answer_chain)
+
+        while True:
+            query = input("\nEnter your question: ")
+            if query.lower() == "exit":
+                break
+            
+            start_time = time.time()
+            resp_dict = rag_chain.invoke({"input": query})
+
+            print_response(resp_dict)
+            print(f"Response time: {time.time() - start_time:.2f}s")
+
+    except Exception as e:
+        print("\nAn error occurred while connecting:")  
+        print(e)
 
 if __name__ == "__main__":
     main()
