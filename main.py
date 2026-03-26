@@ -26,6 +26,21 @@ data = Path("./data")
 cache = Path("./cache")
 cache.mkdir(exist_ok=True)
 
+def metadata_simplify(metadata):
+    dl_meta = metadata.get("dl_meta", None)
+    headings = dl_meta.get("headings", None)
+    doc_items = dl_meta.get("doc_items", None)
+    provs = [item.get("prov", None) for item in doc_items]
+    pages = [prov[0].get("page_no", None) for prov in provs]
+    headings = dl_meta.get("headings", None)
+    source = metadata.get("source", None)
+
+    return {
+        "page": list(set(pages)),
+        "headings": headings,
+        "source": source
+    }
+
 def load_documents():
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -41,7 +56,6 @@ def load_documents():
 
     for subject in data.iterdir():
         for document in subject.iterdir():
-            print(f"Processing {document.name}...")
             cached_doc = cache / f"{document.stem}.pkl"
             if cached_doc.exists():
                 with open(cached_doc, "rb") as f:
@@ -59,11 +73,13 @@ def load_documents():
                     chunker=HybridChunker(tokenizer=tokenizer)
                 )
                 content = loader.load()
+                for chunk in content:
+                    chunk.metadata = metadata_simplify(chunk.metadata)
                 with open(cached_doc, "wb") as f:
                     pickle.dump(content, f)
                 chunks.extend(content)
             except Exception as e:
-                print(f"Lỗi khi xử lý {document.name}: {e}")
+                print(f"Error loading {document.name}: {e}")
 
     end_time = time.time()
     print(f"\nTotal loading time: {end_time - start_time:.2f} seconds")
@@ -95,22 +111,20 @@ def ingest():
     
     return vectorstore
 
-def clip_text(text, threshold=100):
-    return f"{text[:threshold]}..." if len(text) > threshold else text
+def clip_text(text, threshold=250):
+    if len(text) <= threshold:
+        return text
+    return text[:threshold].rstrip() + "..."
 
 def print_response(resp_dict):
-    clipped_answer = clip_text(resp_dict["answer"], threshold=500)
-    print(f"\nANSWER:\n   {clipped_answer}")
-    
+    print(resp_dict["answer"])
     for i, doc in enumerate(resp_dict["context"]):
         print(f"\n[Source {i + 1}]")
         content = doc.page_content.replace("\n", " ").strip()
-        print(f"  Text preview: {clip_text(content, threshold=250)}")
-        page = doc.metadata.get("page_no") or doc.metadata.get("page_number", "N/A")
-        heading = doc.metadata.get("heading", "No Heading") 
-        print(f"  Location:     Page {page} | Heading: {heading}")
-        if "score" in doc.metadata:
-            print(f"  Relevance Score: {doc.metadata['score']:.4f}")
+        print(f"Text preview: {clip_text(content, threshold=250)}")
+        page = doc.metadata.get("page", ["N/A"])
+        source = doc.metadata.get("source", ["N/A"])
+        print(f"Page: {page} | Source: {source}")
 
 def main():
     vectorstore = ingest()
@@ -120,7 +134,7 @@ def main():
     )
 
     load_dotenv()
-    print("⏳ Connecting to Google Generative AI API...")
+    print("Connecting to Google Generative AI API...")
     try:
         llm = ChatGoogleGenerativeAI(model=LLM)
         
