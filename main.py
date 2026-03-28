@@ -25,7 +25,7 @@ LLM = 'HuggingFaceH4/zephyr-7b-beta'
 EXPORT_TYPE = ExportType.DOC_CHUNKS
 TOP_K = 3
 PROMPT_TEMPLATE = PromptTemplate.from_template(
-    'Context information is below.\n---------------------\n{context}\n---------------------\nGiven the context information and not prior knowledge, answer the query.\nQuery: {input}\nAnswer:\n'
+    'Context information is below.\n---------------------\n{context}\n---------------------\nGiven the context information and not prior knowledge, answer the query with 2000 characters max.\nQuery: {input}\nAnswer:\n'
 )
 
 data = Path('./data')
