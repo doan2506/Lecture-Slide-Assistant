@@ -11,40 +11,46 @@ from langchain_huggingface.embeddings import HuggingFaceEmbeddings
 from langchain_core.prompts import PromptTemplate
 from langchain_classic.chains import create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_groq import ChatGroq
 from dotenv import load_dotenv
+from fastapi import FastAPI
+from pydantic import BaseModel
+from contextlib import asynccontextmanager
 
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-LLM = "gemini-3.1-flash-lite-preview"
+load_dotenv()
+
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+EMBEDDING_MODEL = 'sentence-transformers/all-MiniLM-L6-v2'
+LLM = 'HuggingFaceH4/zephyr-7b-beta'
 EXPORT_TYPE = ExportType.DOC_CHUNKS
 TOP_K = 3
 PROMPT_TEMPLATE = PromptTemplate.from_template(
-    "Context information is below.\n---------------------\n{context}\n---------------------\nGiven the context information and not prior knowledge, answer the query.\nQuery: {input}\nAnswer:\n"
+    'Context information is below.\n---------------------\n{context}\n---------------------\nGiven the context information and not prior knowledge, answer the query.\nQuery: {input}\nAnswer:\n'
 )
 
-data = Path("./data")
-cache = Path("./cache")
+data = Path('./data')
+cache = Path('./cache')
 cache.mkdir(exist_ok=True)
 
 def metadata_simplify(metadata):
-    dl_meta = metadata.get("dl_meta", None)
-    headings = dl_meta.get("headings", None)
-    doc_items = dl_meta.get("doc_items", None)
-    provs = [item.get("prov", None) for item in doc_items]
-    pages = [prov[0].get("page_no", None) for prov in provs]
-    headings = dl_meta.get("headings", None)
-    source = metadata.get("source", None)
+    dl_meta = metadata.get('dl_meta', None)
+    headings = dl_meta.get('headings', None)
+    doc_items = dl_meta.get('doc_items', None)
+    provs = [item.get('prov', None) for item in doc_items]
+    pages = [prov[0].get('page_no', None) for prov in provs]
+    headings = dl_meta.get('headings', None)
+    source = metadata.get('source', None)
 
     return {
-        "page": list(set(pages)),
-        "headings": headings,
-        "source": source
+        'page': list(set(pages)),
+        'headings': headings,
+        'source': source
     }
 
 def load_documents():
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
-    print("Loading documents...")
+    print('Loading documents...')
     
     start_time = time.time()
     docling_imported = False 
@@ -56,9 +62,9 @@ def load_documents():
 
     for subject in data.iterdir():
         for document in subject.iterdir():
-            cached_doc = cache / f"{document.stem}.pkl"
+            cached_doc = cache / f'{document.stem}.pkl'
             if cached_doc.exists():
-                with open(cached_doc, "rb") as f:
+                with open(cached_doc, 'rb') as f:
                     content = pickle.load(f)
                 chunks.extend(content)
                 continue
@@ -75,14 +81,14 @@ def load_documents():
                 content = loader.load()
                 for chunk in content:
                     chunk.metadata = metadata_simplify(chunk.metadata)
-                with open(cached_doc, "wb") as f:
+                with open(cached_doc, 'wb') as f:
                     pickle.dump(content, f)
                 chunks.extend(content)
             except Exception as e:
-                print(f"Error loading {document.name}: {e}")
+                print(f'Error loading {document.name}: {e}')
 
     end_time = time.time()
-    print(f"\nTotal loading time: {end_time - start_time:.2f} seconds")
+    print(f'\nTotal loading time: {end_time - start_time:.2f} seconds')
     return chunks
 
 def ingest():
@@ -91,17 +97,17 @@ def ingest():
         model_name=EMBEDDING_MODEL,
         model_kwargs={'device': 'cpu'}
     )
-    db = Path("faiss_db")
+    db = Path('faiss_db')
 
     if db.exists():
-        print("Loading existing FAISS vector database...")
+        print('Loading existing FAISS vector database...')
         vectorstore = FAISS.load_local(
             str(db), 
             embedding,
             allow_dangerous_deserialization=True
         )
     else:
-        print("Creating new FAISS vector database...")
+        print('Creating new FAISS vector database...')
         vectorstore = FAISS.from_documents(
             documents=chunks, 
             embedding=embedding,
@@ -114,47 +120,55 @@ def ingest():
 def clip_text(text, threshold=250):
     if len(text) <= threshold:
         return text
-    return text[:threshold].rstrip() + "..."
+    return text[:threshold].rstrip() + '...'
 
 def print_response(resp_dict):
-    print(resp_dict["answer"])
-    for i, doc in enumerate(resp_dict["context"]):
-        print(f"\n[Source {i + 1}]")
-        content = doc.page_content.replace("\n", " ").strip()
-        print(f"Text preview: {clip_text(content, threshold=250)}")
-        page = doc.metadata.get("page", ["N/A"])
-        source = doc.metadata.get("source", ["N/A"])
-        print(f"Page: {page} | Source: {source}")
+    print(resp_dict['answer'])
+    for i, doc in enumerate(resp_dict['context']):
+        print(f'\n[Source {i + 1}]')
+        content = doc.page_content.replace('\n', ' ').strip()
+        print(f'Text preview: {clip_text(content, threshold=250)}')
+        page = doc.metadata.get('page', ['N/A'])
+        source = doc.metadata.get('source', ['N/A'])
+        print(f'Page: {page} | Source: {source}')
 
-def main():
+ragchain = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global rag_chain
+
     vectorstore = ingest()
     retriever = vectorstore.as_retriever(
-        search_type="similarity",
-        search_kwargs={"k": TOP_K}
+        search_type='similarity',
+        search_kwargs={'k': TOP_K}
     )
-
-    load_dotenv()
-    print("Connecting to Google Generative AI API...")
     try:
-        llm = ChatGoogleGenerativeAI(model=LLM)
-        
+        llm = ChatGroq(
+            model="llama-3.1-8b-instant",
+            temperature=0.3,
+            groq_api_key=GROQ_API_KEY
+        )
         question_answer_chain = create_stuff_documents_chain(llm, PROMPT_TEMPLATE)
         rag_chain = create_retrieval_chain(retriever, question_answer_chain)
-
-        while True:
-            query = input("\nEnter your question: ")
-            if query.lower() == "exit":
-                break
-            
-            start_time = time.time()
-            resp_dict = rag_chain.invoke({"input": query})
-
-            print_response(resp_dict)
-            print(f"Response time: {time.time() - start_time:.2f}s")
-
     except Exception as e:
-        print("\nAn error occurred while connecting:")  
+        print('\nAn error occurred while connecting:')  
         print(e)
+    yield
 
-if __name__ == "__main__":
-    main()
+app = FastAPI(lifespan=lifespan)
+
+class RequestModel(BaseModel):
+    question: str
+
+@app.post('/ask')
+def on_request(req: RequestModel):
+    question = req.question
+    try:
+        start_time = time.time()
+        resp_dict = rag_chain.invoke({'input': question})
+        print(f'Response time: {time.time() - start_time:.2f}s')
+        return {'answer': resp_dict['answer']}
+    except Exception as e:
+        print('\nAn error occurred while connecting:')  
+        print(e)

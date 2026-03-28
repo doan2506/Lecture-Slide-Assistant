@@ -1,3 +1,4 @@
 .env
-cache
-faiss_db
+cache/
+faiss_db/
+__pycache__/
