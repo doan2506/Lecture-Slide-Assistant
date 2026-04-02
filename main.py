@@ -25,7 +25,7 @@ LLM = 'HuggingFaceH4/zephyr-7b-beta'
 EXPORT_TYPE = ExportType.DOC_CHUNKS
 TOP_K = 3
 PROMPT_TEMPLATE = PromptTemplate.from_template(
-    'Context information is below.\n---------------------\n{context}\n---------------------\nGiven the context information and not prior knowledge, answer the query with 2000 characters max.\nQuery: {input}\nAnswer:\n'
+    'Context information is below.\n---------------------\n{context}\n---------------------\nGiven the context information and not prior knowledge, answer the query with under 300 words.\nQuery: {input}\nAnswer:\n'
 )
 
 data = Path('./data')
@@ -123,14 +123,18 @@ def clip_text(text, threshold=250):
     return text[:threshold].rstrip() + '...'
 
 def print_response(resp_dict):
-    print(resp_dict['answer'])
-    for i, doc in enumerate(resp_dict['context']):
-        print(f'\n[Source {i + 1}]')
-        content = doc.page_content.replace('\n', ' ').strip()
-        print(f'Text preview: {clip_text(content, threshold=250)}')
-        page = doc.metadata.get('page', ['N/A'])
-        source = doc.metadata.get('source', ['N/A'])
-        print(f'Page: {page} | Source: {source}')
+    lines = []
+    lines.append(resp_dict['answer'])
+    # for i, doc in enumerate(resp_dict['context']):
+    #     lines.append(f'\n[Source {i + 1}]')
+    #     content = doc.page_content.replace('\n', ' ').strip()
+    #     lines.append(f'Text preview: {clip_text(content, threshold=100)}')
+    #     page = doc.metadata.get('page', 'N/A')
+    #     source = doc.metadata.get('source', 'N/A')
+    #     lines.append(f'Page: {page} | Source: {source}')      
+    final_string = '\n'.join(lines)
+    return final_string
+    
 
 ragchain = None
 
@@ -146,7 +150,7 @@ async def lifespan(app: FastAPI):
     try:
         llm = ChatGroq(
             model="llama-3.1-8b-instant",
-            temperature=0.3,
+            temperature=0,
             groq_api_key=GROQ_API_KEY
         )
         question_answer_chain = create_stuff_documents_chain(llm, PROMPT_TEMPLATE)
@@ -168,7 +172,7 @@ def on_request(req: RequestModel):
         start_time = time.time()
         resp_dict = rag_chain.invoke({'input': question})
         print(f'Response time: {time.time() - start_time:.2f}s')
-        return {'answer': resp_dict['answer']}
+        return {'answer': print_response(resp_dict)}
     except Exception as e:
         print('\nAn error occurred while connecting:')  
         print(e)
